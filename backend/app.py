@@ -105,8 +105,11 @@ def scrape_orders():
     }
     """
     try:
-        data = request.get_json()
-        
+        data = request.get_json(force=False, silent=False)
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON data'}), 400
+    
+    try:
         if not data:
             return jsonify({'error': 'No JSON data provided'}), 400
         

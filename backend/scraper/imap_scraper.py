@@ -118,6 +118,9 @@ def parse_costco_email(subject: str, body: str, debug: bool = False) -> Dict[str
     elif 'delivered' in subject_lower or 'has been delivered' in subject_lower:
         status = 'Delivered'
     
+    # Convert HTML to clean text for easier parsing (used by multiple sections below)
+    clean_body = html_to_text(body) if '<html' in body.lower() else body
+    
     # Extract product name from body
     # Costco emails have product names in HTML divs before "X item from Costco"
     product_name = None
@@ -160,8 +163,6 @@ def parse_costco_email(subject: str, body: str, debug: bool = False) -> Dict[str
     
     # Pattern 2: Try looking for product name patterns in plain text version
     if not product_name:
-        clean_body = html_to_text(body) if '<html' in body.lower() else body
-        
         # Look for lines that look like product names (contain product-like words)
         product_patterns = [
             r'(AirPods[^,\n]{0,50})',
@@ -208,9 +209,9 @@ def parse_costco_email(subject: str, body: str, debug: bool = False) -> Dict[str
     if not product_name and debug:
         print(f"[DEBUG] No product name found for order {order_number}")
     
-    # Extract tracking number (if shipped)
+    # Extract tracking number (if shipped or delivered)
     tracking_number = None
-    if status == 'Shipped':
+    if status in ['Shipped', 'Delivered']:
         tracking_patterns = [
             r'tracking\s*(?:number|#)?[:\s]+([A-Z0-9]{10,30})',
             r'track\s+your\s+(?:package|order)[:\s]+([A-Z0-9]{10,30})',
