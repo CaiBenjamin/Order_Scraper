@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from scraper import scrape_emails, scrape_costco_orders
+from scraper import scrape_emails, scrape_costco_orders, scrape_topps_orders
 from dotenv import load_dotenv
 import os
 
@@ -15,11 +15,14 @@ EMAIL = os.getenv('EMAIL')
 PASSWORD = os.getenv('PASSWORD')
 IMAP_HOST = os.getenv('IMAP_HOST', 'imap.gmail.com')
 IMAP_PORT = int(os.getenv('IMAP_PORT', '993'))
-FOLDER = os.getenv('FOLDER', 'A 2026 Costco Airpods')
 
-# Gmail label to search (exact name from /api/folders)
+# Folder names for different vendors
+COSTCO_FOLDER = os.getenv('COSTCO_FOLDER', 'A 2026 Costco Airpods')
+TOPPS_FOLDER = os.getenv('TOPPS_FOLDER', 'INBOX')
+
+# Gmail labels to search (exact names from /api/folders)
 FOLDERS_TO_SEARCH = [
-    FOLDER,  # From environment variable
+    COSTCO_FOLDER,  # From environment variable
 ]
 
 
@@ -89,6 +92,42 @@ def scrape_costco():
         'folders_searched': FOLDERS_TO_SEARCH,
         'errors': errors if errors else None
     })
+
+
+@app.route('/api/topps', methods=['GET'])
+def scrape_topps():
+    """
+    Endpoint to scrape Topps order emails.
+    Uses hardcoded credentials for now.
+    
+    Returns:
+        - orders: List of Topps orders with product name, status
+        - stats: Overview (total, confirmed, shipped, cancelled)
+    """
+    try:
+        print(f"[INFO] Scraping Topps orders from: {TOPPS_FOLDER}")
+        result = scrape_topps_orders(
+            email=EMAIL,
+            password=PASSWORD,
+            imap_host=IMAP_HOST,
+            imap_port=IMAP_PORT,
+            folder=TOPPS_FOLDER
+        )
+        
+        return jsonify({
+            'success': True,
+            'orders': result['orders'],
+            'stats': result['stats'],
+            'folder_searched': TOPPS_FOLDER
+        })
+    
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'orders': [],
+            'stats': {'total': 0, 'confirmed': 0, 'shipped': 0, 'delivered': 0, 'cancelled': 0}
+        }), 500
 
 
 @app.route('/api/scrape', methods=['POST'])
@@ -248,6 +287,7 @@ if __name__ == '__main__':
     print("Starting Flask server on http://localhost:5000")
     print("Endpoints:")
     print("  GET  /api/costco - Scrape Costco orders (hardcoded credentials)")
+    print("  GET  /api/topps  - Scrape Topps orders (hardcoded credentials)")
     print("  POST /api/scrape - Scrape order emails (custom credentials)")
     print("  GET  /api/health - Health check")
     app.run(debug=True, port=5000)

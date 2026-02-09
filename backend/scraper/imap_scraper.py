@@ -375,6 +375,238 @@ def scrape_costco_orders(
     }
 
 
+def parse_topps_email(subject: str, body: str, debug: bool = False) -> Dict[str, Any] | None:
+    """
+    Parse a Topps order email.
+    
+    Subject patterns:
+    - "Order US-12857405-S confirmed"
+    - "Order US-12857405-S has been canceled"
+    
+    Returns dict with: order_number, status, product_name
+    """
+    subject_lower = subject.lower()
+    body_lower = body.lower()
+    
+    if debug:
+        print(f"[DEBUG] Parsing Topps email with subject: {subject[:80]}...")
+    
+    # Check if this is a Topps order email
+    is_topps_order = (
+        'topps' in subject_lower or 'topps' in body_lower or
+        ('order' in subject_lower and ('us-' in subject_lower or 'us-' in body_lower))
+    )
+    
+    if not is_topps_order:
+        if debug:
+            print(f"[DEBUG] Skipped - not a Topps order email")
+        return None
+    
+    # Extract order number from subject - Topps format: US-XXXXXXXX-S
+    order_number = None
+    
+    # Pattern 1: "Order US-12857405-S"
+    order_match = re.search(r'order\s+(us-\d{7,10}-[a-z])', subject, re.IGNORECASE)
+    if order_match:
+        order_number = order_match.group(1).upper()
+    
+    # Pattern 2: Try finding in body
+    if not order_number:
+        order_match = re.search(r'(us-\d{7,10}-[a-z])', body, re.IGNORECASE)
+        if order_match:
+            order_number = order_match.group(1).upper()
+    
+    if not order_number:
+        if debug:
+            print(f"[DEBUG] Skipped - no order number found in: {subject[:60]}")
+        return None
+    
+    if debug:
+        print(f"[DEBUG] Found order number: {order_number}")
+    
+    # Determine status from subject
+    status = 'Unknown'
+    if 'confirmed' in subject_lower:
+        status = 'Confirmed'
+    elif 'canceled' in subject_lower or 'cancelled' in subject_lower:
+        status = 'Cancelled'
+    elif 'shipped' in subject_lower or 'has shipped' in subject_lower:
+        status = 'Shipped'
+    elif 'delivered' in subject_lower or 'has been delivered' in subject_lower:
+        status = 'Delivered'
+    
+    # Convert HTML to clean text for easier parsing
+    clean_body = html_to_text(body) if '<html' in body.lower() else body
+    
+    # Extract product name from body
+    product_name = None
+    
+    # Pattern 1: Look for product name in common Topps email structures
+    # Topps often has product info near order number
+    patterns = [
+        r'(?:product|item):\s*([^\n]{10,100})',
+        r'([A-Z][A-Za-z0-9\s\-]{10,80})\s*-\s*Order',
+        r'Order\s+' + re.escape(order_number) + r'\s*[:\-]?\s*([^\n]{10,100})',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, clean_body, re.IGNORECASE)
+        if match:
+            product_name = match.group(1).strip()
+            product_name = re.sub(r'\s+', ' ', product_name)
+            if len(product_name) > 10 and not product_name.startswith('http'):
+                break
+            else:
+                product_name = None
+    
+    # Fallback: Use "Topps Order" if we can't find specific product
+    if not product_name:
+        product_name = "Topps Order"
+    
+    return {
+        'order_number': order_number,
+        'status': status,
+        'product_name': product_name,
+        'tracking_number': None  # Topps emails don't typically have tracking in subject
+    }
+
+
+def scrape_topps_orders(
+    email: str,
+    password: str,
+    imap_host: str = 'imap.gmail.com',
+    imap_port: int = 993,
+    folder: str = 'INBOX',
+    limit: int = 10000,
+    debug: bool = True
+) -> Dict[str, Any]:
+    """
+    Connect to IMAP server and scrape Topps order emails.
+    
+    Returns dict with:
+        - orders: List of order dicts
+        - stats: Overview stats (total, confirmed, shipped, cancelled)
+    """
+    orders = []
+    seen_orders = {}  # Track orders by order_number
+    
+    try:
+        with IMAPClient(imap_host, port=imap_port, ssl=True) as client:
+            # Login
+            client.login(email, password)
+            print(f"[INFO] Logged in successfully as {email}")
+            
+            # Select folder
+            client.select_folder(folder, readonly=True)
+            print(f"[INFO] Selected folder: {folder}")
+            
+            # Search for Topps emails
+            if folder == 'INBOX':
+                # Try searching for Topps-related emails
+                messages = client.search(['OR', 'FROM', 'topps', 'SUBJECT', 'US-'])
+            else:
+                # Assume folder is already filtered
+                messages = client.search(['ALL'])
+            
+            print(f"[INFO] Found {len(messages)} emails in folder")
+            
+            # Get recent emails
+            recent_messages = messages[-limit:] if len(messages) > limit else messages
+            
+            # Fetch email data
+            if recent_messages:
+                fetched = client.fetch(recent_messages, ['ENVELOPE', 'BODY[]', 'INTERNALDATE'])
+                
+                for uid, message_data in fetched.items():
+                    try:
+                        envelope = message_data[b'ENVELOPE']
+                        raw_email = message_data[b'BODY[]']
+                        date = message_data[b'INTERNALDATE']
+                        
+                        # Parse email
+                        msg = message_from_bytes(raw_email)
+                        
+                        # Get subject
+                        subject = decode_email_header(envelope.subject) if envelope.subject else ''
+                        
+                        # Get body
+                        body = ''
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                content_type = part.get_content_type()
+                                if content_type == 'text/html':
+                                    payload = part.get_payload(decode=True)
+                                    if payload:
+                                        body = payload.decode('utf-8', errors='replace')
+                                        break
+                                elif content_type == 'text/plain' and not body:
+                                    payload = part.get_payload(decode=True)
+                                    if payload:
+                                        body = payload.decode('utf-8', errors='replace')
+                        else:
+                            payload = msg.get_payload(decode=True)
+                            if payload:
+                                body = payload.decode('utf-8', errors='replace')
+                        
+                        # Print email info for debugging
+                        email_date = date.strftime('%Y-%m-%d') if date else 'Unknown'
+                        print(f"[EMAIL] {email_date} | {subject[:60]}...")
+                        
+                        # Parse Topps order info
+                        order_info = parse_topps_email(subject, body, debug=debug)
+                        
+                        if order_info:
+                            print(f"  -> Matched! Order #{order_info['order_number']} - {order_info['status']}")
+                            order_num = order_info['order_number']
+                            order_date = date.isoformat() if date else ''
+                            
+                            order_data = {
+                                'id': str(uid),
+                                'order_number': order_num,
+                                'product_name': order_info['product_name'],
+                                'status': order_info['status'],
+                                'tracking_number': order_info['tracking_number'],
+                                'date': order_date,
+                                'subject': subject[:100]
+                            }
+                            
+                            # Keep track of orders - update if we find a newer status
+                            if order_num not in seen_orders:
+                                seen_orders[order_num] = order_data
+                            else:
+                                # Update with higher priority status
+                                status_priority = {'Confirmed': 1, 'Cancelled': 2, 'Shipped': 3, 'Delivered': 4, 'Unknown': 0}
+                                if status_priority.get(order_info['status'], 0) > status_priority.get(seen_orders[order_num]['status'], 0):
+                                    seen_orders[order_num] = order_data
+                    
+                    except Exception as e:
+                        print(f"Error processing email {uid}: {e}")
+                        continue
+            
+            client.logout()
+    
+    except Exception as e:
+        raise Exception(f"IMAP connection failed: {str(e)}")
+    
+    # Convert to list and sort by date (most recent first)
+    orders = list(seen_orders.values())
+    orders.sort(key=lambda x: x['date'], reverse=True)
+    
+    # Calculate stats
+    stats = {
+        'total': len(orders),
+        'confirmed': sum(1 for o in orders if o['status'] == 'Confirmed'),
+        'shipped': sum(1 for o in orders if o['status'] == 'Shipped'),
+        'delivered': sum(1 for o in orders if o['status'] == 'Delivered'),
+        'cancelled': sum(1 for o in orders if o['status'] == 'Cancelled')
+    }
+    
+    return {
+        'orders': orders,
+        'stats': stats
+    }
+
+
 # Keep the generic scraper for other vendors
 def scrape_emails(
     email: str,
