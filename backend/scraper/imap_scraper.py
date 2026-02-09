@@ -567,7 +567,8 @@ def scrape_topps_orders(
                                 'status': order_info['status'],
                                 'tracking_number': order_info['tracking_number'],
                                 'date': order_date,
-                                'subject': subject[:100]
+                                'subject': subject[:100],
+                                'email_account': email  # Add email account field
                             }
                             
                             # Keep track of orders - update if we find a newer status
